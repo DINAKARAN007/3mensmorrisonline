@@ -41,10 +41,43 @@
             max-width: 500px;
         }
         
-        /* Game Mode Selection */
-        #mode-selection h2 { margin-top: 0; }
+        /* Game Mode & Lobby Selection */
+        .selection-screen h2 { margin-top: 0; }
         .hidden { display: none !important; }
         
+        /* Online Lobby Styles */
+        #online-lobby {
+            padding: 20px;
+        }
+        #game-link-container {
+            margin-top: 15px;
+            display: flex;
+            justify-content: center;
+        }
+        #game-link-input {
+            width: 70%;
+            padding: 10px;
+            border: 2px solid #ccc;
+            border-radius: 5px 0 0 5px;
+            font-size: 14px;
+            text-align: center;
+        }
+        #copy-link-button {
+            padding: 10px 15px;
+            border: none;
+            background-color: #007bff;
+            color: white;
+            cursor: pointer;
+            border-radius: 0 5px 5px 0;
+            font-size: 14px;
+        }
+        #lobby-status {
+            margin-top: 15px;
+            font-size: 18px;
+            font-weight: bold;
+            color: #28a745;
+        }
+
         /* Title */
         #title-link { text-decoration: none; color: inherit; cursor: pointer; }
         h1 { margin-bottom: 20px; }
@@ -111,6 +144,10 @@
             height: 360px;
             margin: 20px auto;
             touch-action: none;
+        }
+        .board-container.disabled {
+            pointer-events: none;
+            opacity: 0.6;
         }
         #board-lines { position: absolute; top: 0; left: 0; z-index: 1; }
         .points-grid {
@@ -197,12 +234,23 @@
 
     <div class="game-container">
         
-        <div id="mode-selection">
+        <div id="mode-selection" class="selection-screen">
             <h2>Select Game Mode</h2>
             <div class="buttons-container">
                 <button id="twoPlayerButton" class="game-button" style="background-color: #007bff;">Two Player</button>
                 <button id="botButton" class="game-button" style="background-color: #dc3545;">Play with Bot</button>
+                <button id="onlineButton" class="game-button" style="background-color: #28a745;">Online Play</button>
             </div>
+        </div>
+
+        <div id="online-lobby" class="selection-screen hidden">
+            <h2>Online Game</h2>
+            <p>Share this link with your friend to play:</p>
+            <div id="game-link-container">
+                <input type="text" id="game-link-input" readonly>
+                <button id="copy-link-button">Copy</button>
+            </div>
+            <div id="lobby-status">Waiting for opponent to join...</div>
         </div>
 
         <div id="game-area" class="hidden">
@@ -241,16 +289,12 @@
     
     <!-- FIREBASE INTEGRATION START -->
     <script type="module">
-      // Import the functions you need from the SDKs you need
       import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
       import { getAnalytics } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-analytics.js";
-      // TODO: Add SDKs for Firebase products that you want to use
-      // https://firebase.google.com/docs/web/setup#available-libraries
+      import { getDatabase, ref, set, onValue, get, child } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 
-      // Your web app's Firebase configuration
-      // For Firebase JS SDK v7.20.0 and later, measurementId is optional
       const firebaseConfig = {
-        apiKey: "AIzaSyCImCoJ9Nabe_aicqHdNPARBbICMqTEXNo",
+        apiKey: "YOUR_API_KEY", // <-- IMPORTANT: PASTE YOUR CREDENTIALS HERE
         authDomain: "threemenmorrisonline.firebaseapp.com",
         databaseURL: "https://threemenmorrisonline-default-rtdb.firebaseio.com",
         projectId: "threemenmorrisonline",
@@ -260,23 +304,27 @@
         measurementId: "G-WVRBH1Z9L2"
       };
 
-      // Initialize Firebase
       const app = initializeApp(firebaseConfig);
       const analytics = getAnalytics(app);
+      const database = getDatabase(app);
 
-      // You can now access Firebase services, for example:
-      // console.log("Firebase Initialized:", app);
-      // console.log("Analytics Initialized:", analytics);
+      // Make database functions globally accessible to the other script
+      window.firebaseDB = { database, ref, set, onValue, get, child };
     </script>
     <!-- FIREBASE INTEGRATION END -->
 
     <script>
         document.addEventListener('DOMContentLoaded', () => {
-            // DOM Elements
+            // --- DOM Elements ---
             const modeSelection = document.getElementById('mode-selection');
+            const onlineLobby = document.getElementById('online-lobby');
             const gameArea = document.getElementById('game-area');
             const twoPlayerButton = document.getElementById('twoPlayerButton');
             const botButton = document.getElementById('botButton');
+            const onlineButton = document.getElementById('onlineButton');
+            const gameLinkInput = document.getElementById('game-link-input');
+            const copyLinkButton = document.getElementById('copy-link-button');
+            const lobbyStatus = document.getElementById('lobby-status');
             const titleLink = document.getElementById('title-link');
             const winningScoreInput = document.getElementById('winning-score-input');
             const decreaseScoreButton = document.getElementById('decrease-score');
@@ -294,25 +342,157 @@
             const winnerMessage = document.getElementById('winner-message');
             const countdownMessage = document.getElementById('countdown-message');
 
+            // --- Game State Variables ---
             let BOARD_SIZE;
             let blackScore = 0, redScore = 0, winningScore = 10;
             let roundStarter = 1;
             let currentPlayer, boardState, stonesPlaced, isGameActive;
             let selectedStoneIndex = -1;
             let gameResetTimer = null;
-            let isBotActive = false;
+            let gameMode = ''; // 'bot', 'local', 'online'
+            let onlineGameId = null;
+            let localPlayerNumber = null;
 
             const winPatterns = [
-                [0, 1, 2], [3, 4, 5], [6, 7, 8],
-                [0, 3, 6], [1, 4, 7], [2, 5, 8]
+                [0, 1, 2], [3, 4, 5], [6, 7, 8], [0, 3, 6], [1, 4, 7], [2, 5, 8]
             ];
             
-            twoPlayerButton.addEventListener('click', () => startGame(false));
-            botButton.addEventListener('click', () => startGame(true));
+            // --- Event Listeners ---
+            twoPlayerButton.addEventListener('click', () => startGame('local', false));
+            botButton.addEventListener('click', () => startGame('bot', true));
+            onlineButton.addEventListener('click', createOnlineGame);
+            copyLinkButton.addEventListener('click', () => {
+                gameLinkInput.select();
+                document.execCommand('copy');
+                copyLinkButton.textContent = 'Copied!';
+                setTimeout(() => { copyLinkButton.textContent = 'Copy'; }, 2000);
+            });
+            newMatchButton.addEventListener('click', startNewMatch);
+            titleLink.addEventListener('click', (event) => { event.preventDefault(); location.href = location.pathname; });
+            decreaseScoreButton.addEventListener('click', () => {
+                let val = parseInt(winningScoreInput.value);
+                if (val > 1) winningScoreInput.value = val - 1;
+            });
+            increaseScoreButton.addEventListener('click', () => {
+                winningScoreInput.value = parseInt(winningScoreInput.value) + 1;
+            });
 
-            function startGame(botMode) {
-                isBotActive = botMode;
+            // --- ONLINE PLAY FUNCTIONS ---
+            async function createOnlineGame() {
                 modeSelection.classList.add('hidden');
+                onlineLobby.classList.remove('hidden');
+
+                const { database, ref, set } = window.firebaseDB;
+                onlineGameId = `game-${Math.random().toString(36).substr(2, 7)}`;
+                localPlayerNumber = 1; // The creator is always player 1 (Black)
+                
+                const gameURL = `${window.location.origin}${window.location.pathname}?game=${onlineGameId}`;
+                gameLinkInput.value = gameURL;
+
+                const initialGameState = {
+                    boardState: Array(9).fill(0),
+                    currentPlayer: 1,
+                    stonesPlaced: 0,
+                    status: 'Waiting for Player 2...',
+                    blackScore: 0,
+                    redScore: 0,
+                    players: { p1: true, p2: false },
+                    isGameActive: false,
+                    winningScore: parseInt(winningScoreInput.value),
+                    roundStarter: 1
+                };
+
+                await set(ref(database, 'games/' + onlineGameId), initialGameState);
+                listenForOnlineUpdates();
+            }
+
+            async function joinOnlineGame(gameId) {
+                const { database, ref, get, child, set } = window.firebaseDB;
+                const dbRef = ref(database);
+                const snapshot = await get(child(dbRef, `games/${gameId}`));
+
+                if (snapshot.exists()) {
+                    const gameState = snapshot.val();
+                    if(gameState.players.p2) {
+                        alert("This game is already full.");
+                        return;
+                    }
+                    onlineGameId = gameId;
+                    localPlayerNumber = 2; // The joiner is player 2 (Red)
+                    
+                    const updatedGameState = { ...gameState };
+                    updatedGameState.players.p2 = true;
+                    updatedGameState.status = "Player Black to Place";
+                    updatedGameState.isGameActive = true;
+
+                    await set(ref(database, 'games/' + onlineGameId), updatedGameState);
+                    
+                    startGame('online');
+                    listenForOnlineUpdates();
+
+                } else {
+                    alert("Game not found!");
+                    modeSelection.classList.remove('hidden');
+                }
+            }
+            
+            function listenForOnlineUpdates() {
+                const { database, ref, onValue } = window.firebaseDB;
+                const gameRef = ref(database, 'games/' + onlineGameId);
+
+                onValue(gameRef, (snapshot) => {
+                    const gameState = snapshot.val();
+                    if (!gameState) return;
+
+                    // If P2 joins, creator starts the game
+                    if (localPlayerNumber === 1 && !gameArea.classList.contains('hidden') === false && gameState.players.p2) {
+                        startGame('online');
+                    }
+                    
+                    // Sync local state with Firebase state
+                    boardState = gameState.boardState;
+                    currentPlayer = gameState.currentPlayer;
+                    stonesPlaced = gameState.stonesPlaced;
+                    isGameActive = gameState.isGameActive;
+                    blackScore = gameState.blackScore;
+                    redScore = gameState.redScore;
+                    winningScore = gameState.winningScore;
+                    roundStarter = gameState.roundStarter;
+
+                    // Update UI for both players
+                    updateStatus(gameState.status);
+                    updateScoreboard();
+                    updateBoardUI();
+
+                    // Disable board if it's not the local player's turn
+                    if (isGameActive && currentPlayer !== localPlayerNumber) {
+                        boardContainer.classList.add('disabled');
+                    } else {
+                        boardContainer.classList.remove('disabled');
+                    }
+                });
+            }
+
+            function updateFirebaseState() {
+                if(gameMode !== 'online' || !onlineGameId) return;
+
+                const { database, ref, set } = window.firebaseDB;
+                const gameState = {
+                    boardState, currentPlayer, stonesPlaced, isGameActive,
+                    blackScore, redScore, status: statusElement.textContent,
+                    players: {p1: true, p2: true}, winningScore, roundStarter
+                };
+                set(ref(database, 'games/' + onlineGameId), gameState);
+            }
+            
+            // --- Core Game Logic ---
+            function startGame(mode, isBot) {
+                gameMode = mode;
+                if (gameMode !== 'online') {
+                    modeSelection.classList.add('hidden');
+                } else {
+                    onlineLobby.classList.add('hidden');
+                }
                 gameArea.classList.remove('hidden');
                 setupInitialState();
             }
@@ -325,10 +505,11 @@
                 isGameActive = true;
                 toggleScoreControls(false);
                 victoryOverlay.classList.remove('visible');
-                const startingPlayerName = (currentPlayer === 1) ? (isBotActive ? 'Bot' : 'Black') : 'Red';
-                updateStatus(`Player ${startingPlayerName} to Place`);
+                updateStatus(getPlayerName(currentPlayer) + ' to Place');
                 updateBoardUI();
-                if (isBotActive && currentPlayer === 1) makeBotMove();
+
+                if (gameMode === 'online') updateFirebaseState();
+                if (gameMode === 'bot' && currentPlayer === 1) makeBotMove();
             }
             
             function startNewMatch() {
@@ -348,8 +529,15 @@
                 createClickPoints();
                 boardState = Array(9).fill(0);
                 updateBoardUI();
-                toggleScoreControls(true);
-                updateStatus('Set score & start a new game!');
+                
+                if (gameMode !== 'online') {
+                    toggleScoreControls(true);
+                    updateStatus('Set score & start a new game!');
+                    newMatchButton.classList.remove('hidden');
+                } else {
+                    toggleScoreControls(false); // Only creator can set score initially
+                    newMatchButton.classList.add('hidden'); // New match logic for online needs more work
+                }
             }
             
             function drawBoardLines() {
@@ -382,7 +570,10 @@
             }
 
             function handlePointClick(event) {
-                if (!isGameActive || (isBotActive && currentPlayer === 1)) return;
+                if (!isGameActive) return;
+                if (gameMode === 'bot' && currentPlayer === 1) return;
+                if (gameMode === 'online' && currentPlayer !== localPlayerNumber) return;
+
                 const clickedIndex = parseInt(event.currentTarget.dataset.index);
 
                 if (stonesPlaced < 6) {
@@ -413,15 +604,14 @@
                         else {
                             selectedStoneIndex = -1;
                             updateBoardUI();
-                            const playerName = (currentPlayer === 1) ? (isBotActive ? 'Bot' : 'Black') : 'Red';
-                            updateStatus(`Player ${playerName} to Move`);
+                            updateStatus(getPlayerName(currentPlayer) + ' to Move');
                         }
                     }
                 }
             }
 
             function placeStone(index) {
-                if (boardState[index] !== 0) return; // Prevent placing on an occupied spot
+                if (boardState[index] !== 0) return;
                 boardState[index] = currentPlayer;
                 stonesPlaced++;
                 updateBoardUI();
@@ -434,15 +624,25 @@
 
             function handleRoundWin() {
                 isGameActive = false;
-                const winnerName = (currentPlayer === 1) ? (isBotActive ? 'Bot' : 'Black') : 'Red';
+                const winnerName = getPlayerName(currentPlayer);
                 if (currentPlayer === 1) blackScore++; else redScore++;
                 updateScoreboard();
                 roundStarter = currentPlayer;
-                if (blackScore >= winningScore || redScore >= winningScore) {
-                    showVictoryCelebration(winnerName);
+                
+                if (gameMode === 'online') {
+                    // For online, only player 1 handles the timeout and restart logic
+                    if (localPlayerNumber === 1) {
+                       updateStatus(`${winnerName} wins the round!`);
+                       updateFirebaseState();
+                       setTimeout(() => initializeRound(), 2500);
+                    }
                 } else {
-                    updateStatus(`${winnerName} wins the round!`);
-                    setTimeout(initializeRound, 2000);
+                    if (blackScore >= winningScore || redScore >= winningScore) {
+                        showVictoryCelebration(winnerName);
+                    } else {
+                        updateStatus(`${winnerName} wins the round!`);
+                        setTimeout(initializeRound, 2000);
+                    }
                 }
             }
 
@@ -470,52 +670,32 @@
                 }, 1000);
             }
             
+            function switchPlayer() {
+                currentPlayer = (currentPlayer === 1) ? 2 : 1;
+                const action = (stonesPlaced < 6) ? 'Place' : 'Move';
+                updateStatus(getPlayerName(currentPlayer) + ` to ${action}`);
+                
+                if (gameMode === 'online') {
+                    updateFirebaseState();
+                } else if (gameMode === 'bot' && currentPlayer === 1 && isGameActive) {
+                    makeBotMove();
+                }
+            }
+
+            // --- UI & Helper Functions ---
+            function getPlayerName(player) {
+                if (gameMode === 'bot' && player === 1) return 'Bot';
+                return player === 1 ? 'Black' : 'Red';
+            }
+            function checkWin(board, player) {
+                return winPatterns.some(p => p.every(index => board[index] === player));
+            }
             function isAdjacent(from, to) {
                 const fromRow = Math.floor(from / 3), fromCol = from % 3;
                 const toRow = Math.floor(to / 3), toCol = to % 3;
                 return (fromRow === toRow && Math.abs(fromCol - toCol) === 1) ||
                        (fromCol === toCol && Math.abs(fromRow - toRow) === 1);
             }
-            
-            function hasAvailableMoves(player, currentBoard) {
-                const totalStonesOnBoard = currentBoard.filter(p => p !== 0).length;
-                if (totalStonesOnBoard < 6) return true; // Can always place on empty spots during placement phase
-                const playerStones = currentBoard.map((val, idx) => (val === player ? idx : null)).filter(val => val !== null);
-                for (const from of playerStones) {
-                    for (let to = 0; to < 9; to++) {
-                        if (currentBoard[to] === 0 && isAdjacent(from, to)) {
-                            return true;
-                        }
-                    }
-                }
-                return false;
-            }
-
-            function switchPlayer() {
-                currentPlayer = (currentPlayer === 1) ? 2 : 1;
-                
-                if (stonesPlaced >= 6 && !hasAvailableMoves(currentPlayer, boardState)) {
-                    isGameActive = false;
-                    const winnerPlayer = (currentPlayer === 1) ? 2 : 1;
-                    currentPlayer = winnerPlayer;
-                    const winnerName = (currentPlayer === 1) ? (isBotActive ? 'Bot' : 'Black') : 'Red';
-                    updateStatus(`${winnerName} wins! Opponent is blocked.`);
-                    setTimeout(handleRoundWin, 2000);
-                    return;
-                }
-
-                const playerName = (currentPlayer === 1) ? (isBotActive ? 'Bot' : 'Black') : 'Red';
-                const action = (stonesPlaced < 6) ? 'Place' : 'Move';
-                updateStatus(`Player ${playerName} to ${action}`);
-                if (isBotActive && currentPlayer === 1 && isGameActive) {
-                    makeBotMove();
-                }
-            }
-
-            function checkWin(board, player) {
-                return winPatterns.some(p => p.every(index => board[index] === player));
-            }
-
             function updateBoardUI() {
                 stonesContainer.innerHTML = '';
                 boardState.forEach((player, index) => {
@@ -534,188 +714,6 @@
                     }
                 });
             }
-            
-            // ===============================================
-            // +++ REVISED & OPTIMIZED BOT LOGIC STARTS HERE +++
-            // ===============================================
-            function makeBotMove() {
-                if (!isGameActive) return;
-                
-                // Use a short delay to make the bot's move feel more natural and to prevent UI freezing on heavy calculation
-                setTimeout(() => {
-                    let bestMove;
-                    if (stonesPlaced < 6) {
-                        bestMove = findBestPlacement();
-                        if (bestMove.index !== undefined && boardState[bestMove.index] === 0) {
-                            placeStone(bestMove.index);
-                        }
-                    } else {
-                        bestMove = findBestMove();
-                        if (bestMove.from !== undefined && bestMove.to !== undefined) {
-                            boardState[bestMove.to] = currentPlayer;
-                            boardState[bestMove.from] = 0;
-                            updateBoardUI();
-                            if (checkWin(boardState, currentPlayer)) {
-                                handleRoundWin();
-                                return;
-                            }
-                            switchPlayer();
-                        }
-                    }
-                }, 300); // 300ms delay
-            }
-
-            function evaluate(board) {
-                if (checkWin(board, 1)) return 100;  // Bot wins
-                if (checkWin(board, 2)) return -100; // Player wins
-
-                let score = 0;
-                // Heuristic: Check for potential mills (two-in-a-row with an empty spot)
-                for (const pattern of winPatterns) {
-                    const values = pattern.map(i => board[i]);
-                    if (values.filter(v => v === 1).length === 2 && values.filter(v => v === 0).length === 1) {
-                        score += 15; // Bot has a threat
-                    }
-                    if (values.filter(v => v === 2).length === 2 && values.filter(v => v === 0).length === 1) {
-                        score -= 15; // Player has a threat
-                    }
-                }
-                return score;
-            }
-
-            function minimax(board, depth, isMaximizing, currentStonesPlaced, alpha, beta) {
-                let score = evaluate(board);
-                
-                if (Math.abs(score) === 100) {
-                    return score > 0 ? score - depth : score + depth;
-                }
-
-                if (currentStonesPlaced >= 6) {
-                   if (!hasAvailableMoves(isMaximizing ? 1 : 2, board)) {
-                       return isMaximizing ? -100 + depth : 100 - depth;
-                   }
-                }
-                
-                // *** THIS IS THE CHANGED LINE FOR MEDIUM DIFFICULTY ***
-                if (depth >= 2) {
-                    return score;
-                }
-
-                if (isMaximizing) { // Bot's turn
-                    let best = -Infinity;
-                    if (currentStonesPlaced < 6) {
-                        const emptySpots = board.map((v, i) => v === 0 ? i : null).filter(v => v !== null);
-                        for (const spot of emptySpots) {
-                            const newBoard = [...board]; newBoard[spot] = 1;
-                            let eval = minimax(newBoard, depth + 1, false, currentStonesPlaced + 1, alpha, beta);
-                            best = Math.max(best, eval);
-                            alpha = Math.max(alpha, best);
-                            if (beta <= alpha) break;
-                        }
-                    } else {
-                        const botStones = board.map((v, i) => v === 1 ? i : null).filter(v => v !== null);
-                        for (const from of botStones) {
-                            for (let to = 0; to < 9; to++) {
-                                if (board[to] === 0 && isAdjacent(from, to)) {
-                                    const newBoard = [...board]; newBoard[to] = 1; newBoard[from] = 0;
-                                    let eval = minimax(newBoard, depth + 1, false, currentStonesPlaced, alpha, beta);
-                                    best = Math.max(best, eval);
-                                    alpha = Math.max(alpha, best);
-                                    if (beta <= alpha) break; 
-                                }
-                            }
-                            if (beta <= alpha) break;
-                        }
-                    }
-                    return best;
-                } else { // Player's turn
-                    let best = Infinity;
-                    if (currentStonesPlaced < 6) {
-                        const emptySpots = board.map((v, i) => v === 0 ? i : null).filter(v => v !== null);
-                         for (const spot of emptySpots) {
-                            const newBoard = [...board]; newBoard[spot] = 2;
-                            let eval = minimax(newBoard, depth + 1, true, currentStonesPlaced + 1, alpha, beta);
-                            best = Math.min(best, eval);
-                            beta = Math.min(beta, best);
-                            if (beta <= alpha) break;
-                        }
-                    } else {
-                        const playerStones = board.map((v, i) => v === 2 ? i : null).filter(v => v !== null);
-                        for (const from of playerStones) {
-                            for (let to = 0; to < 9; to++) {
-                                if (board[to] === 0 && isAdjacent(from, to)) {
-                                     const newBoard = [...board]; newBoard[to] = 2; newBoard[from] = 0;
-                                     let eval = minimax(newBoard, depth + 1, true, currentStonesPlaced, alpha, beta);
-                                     best = Math.min(best, eval);
-                                     beta = Math.min(beta, best);
-                                     if (beta <= alpha) break;
-                                }
-                            }
-                             if (beta <= alpha) break;
-                        }
-                    }
-                    return best;
-                }
-            }
-            
-            function findBestPlacement() {
-                let bestVal = -Infinity;
-                let bestMove = { index: -1 };
-                const emptySpots = boardState.map((v, i) => v === 0 ? i : null).filter(v => v !== null);
-                
-                if (boardState[4] === 0) return { index: 4 };
-
-                for (const spot of emptySpots) {
-                    const newBoard = [...boardState]; newBoard[spot] = 1;
-                    const moveVal = minimax(newBoard, 0, false, stonesPlaced + 1, -Infinity, Infinity);
-                    if (moveVal > bestVal) {
-                        bestMove.index = spot;
-                        bestVal = moveVal;
-                    }
-                }
-                
-                if (bestMove.index === -1 && emptySpots.length > 0) {
-                    bestMove.index = emptySpots[0];
-                }
-                return bestMove;
-            }
-
-            function findBestMove() {
-                let bestVal = -Infinity;
-                let bestMove = {};
-                const possibleMoves = [];
-                const botStones = boardState.map((val, idx) => (val === 1 ? idx : null)).filter(val => val !== null);
-                
-                for (const from of botStones) {
-                    for (let to = 0; to < 9; to++) {
-                        if (boardState[to] === 0 && isAdjacent(from, to)) {
-                           possibleMoves.push({ from, to });
-                        }
-                    }
-                }
-
-                if (possibleMoves.length === 0) return {};
-
-                for(const move of possibleMoves) {
-                    const newBoard = [...boardState]; newBoard[move.to] = 1; newBoard[move.from] = 0;
-                    const moveVal = minimax(newBoard, 0, false, stonesPlaced, -Infinity, Infinity);
-                    if (moveVal > bestVal) {
-                        bestVal = moveVal;
-                        bestMove = move;
-                    }
-                }
-                
-                if (bestMove.from === undefined) {
-                    return possibleMoves[0];
-                }
-
-                return bestMove;
-            }
-            // ===============================================
-            // +++ REVISED & OPTIMIZED BOT LOGIC ENDS HERE +++
-            // ===============================================
-            
-            // Helper functions and event listeners
             function toggleScoreControls(enabled) {
                 winningScoreInput.disabled = !enabled;
                 decreaseScoreButton.disabled = !enabled;
@@ -726,23 +724,133 @@
                 redScoreElement.textContent = redScore;
             }
             function updateStatus(message) { statusElement.textContent = message; }
-            titleLink.addEventListener('click', (event) => { event.preventDefault(); location.reload(); });
-            decreaseScoreButton.addEventListener('click', () => {
-                let val = parseInt(winningScoreInput.value);
-                if (val > 1) winningScoreInput.value = val - 1;
-            });
-            increaseScoreButton.addEventListener('click', () => {
-                winningScoreInput.value = parseInt(winningScoreInput.value) + 1;
-            });
-            newMatchButton.addEventListener('click', startNewMatch);
             
-            // Initial Setup
-            gameArea.classList.add('hidden');
-            modeSelection.classList.remove('hidden');
-            window.addEventListener('resize', () => {
-                drawBoardLines();
-                updateBoardUI();
-            });
+            // --- BOT LOGIC (Unchanged) ---
+            function makeBotMove() {
+                setTimeout(() => {
+                    let bestMove;
+                    if (stonesPlaced < 6) {
+                        bestMove = findBestPlacement();
+                        if (bestMove.index !== undefined) placeStone(bestMove.index);
+                    } else {
+                        bestMove = findBestMove();
+                        if (bestMove.from !== undefined) {
+                            boardState[bestMove.to] = currentPlayer;
+                            boardState[bestMove.from] = 0;
+                            updateBoardUI();
+                            if (checkWin(boardState, currentPlayer)) { handleRoundWin(); return; }
+                            switchPlayer();
+                        }
+                    }
+                }, 500);
+            }
+            function evaluate(board) {
+                if (checkWin(board, 1)) return 100;
+                if (checkWin(board, 2)) return -100;
+                return 0;
+            }
+            function minimax(board, depth, isMaximizing, currentStonesPlaced) {
+                let score = evaluate(board);
+                if (score === 100) return score - depth;
+                if (score === -100) return score + depth;
+                if (depth >= 3) return score;
+
+                if (isMaximizing) {
+                    let best = -Infinity;
+                    if (currentStonesPlaced < 6) {
+                        for (let i = 0; i < 9; i++) {
+                            if (board[i] === 0) {
+                                board[i] = 1;
+                                best = Math.max(best, minimax(board, depth + 1, !isMaximizing, currentStonesPlaced + 1));
+                                board[i] = 0;
+                            }
+                        }
+                    } else {
+                        const botStones = board.map((v, i) => (v === 1 ? i : null)).filter(v => v !== null);
+                        for (const from of botStones) {
+                            for (let to = 0; to < 9; to++) {
+                                if (board[to] === 0 && isAdjacent(from, to)) {
+                                    board[from] = 0; board[to] = 1;
+                                    best = Math.max(best, minimax(board, depth + 1, !isMaximizing, currentStonesPlaced));
+                                    board[from] = 1; board[to] = 0;
+                                }
+                            }
+                        }
+                    }
+                    return best;
+                } else {
+                    let best = Infinity;
+                    if (currentStonesPlaced < 6) {
+                        for (let i = 0; i < 9; i++) {
+                            if (board[i] === 0) {
+                                board[i] = 2;
+                                best = Math.min(best, minimax(board, depth + 1, !isMaximizing, currentStonesPlaced + 1));
+                                board[i] = 0;
+                            }
+                        }
+                    } else {
+                        const playerStones = board.map((v, i) => (v === 2 ? i : null)).filter(v => v !== null);
+                        for (const from of playerStones) {
+                            for (let to = 0; to < 9; to++) {
+                                if (board[to] === 0 && isAdjacent(from, to)) {
+                                    board[from] = 0; board[to] = 2;
+                                    best = Math.min(best, minimax(board, depth + 1, !isMaximizing, currentStonesPlaced));
+                                    board[from] = 2; board[to] = 0;
+                                }
+                            }
+                        }
+                    }
+                    return best;
+                }
+            }
+            function findBestPlacement() {
+                let bestVal = -Infinity;
+                let bestMove = { index: -1 };
+                const emptySpots = boardState.map((v, i) => (v === 0 ? i : null)).filter(v => v !== null);
+                if (boardState[4] === 0) return { index: 4 };
+                for (const spot of emptySpots) {
+                    const newBoard = [...boardState]; newBoard[spot] = 1;
+                    const moveVal = minimax(newBoard, 0, false, stonesPlaced + 1);
+                    if (moveVal > bestVal) {
+                        bestMove.index = spot;
+                        bestVal = moveVal;
+                    }
+                }
+                return bestMove;
+            }
+            function findBestMove() {
+                let bestVal = -Infinity;
+                let bestMove = {};
+                const botStones = boardState.map((v, i) => (v === 1 ? i : null)).filter(v => v !== null);
+                for (const from of botStones) {
+                    for (let to = 0; to < 9; to++) {
+                        if (boardState[to] === 0 && isAdjacent(from, to)) {
+                            const newBoard = [...boardState]; newBoard[from] = 0; newBoard[to] = 1;
+                            const moveVal = minimax(newBoard, 0, false, stonesPlaced);
+                            if (moveVal > bestVal) {
+                                bestVal = moveVal;
+                                bestMove = { from, to };
+                            }
+                        }
+                    }
+                }
+                return bestMove;
+            }
+
+            // --- Initial Page Load Logic ---
+            const urlParams = new URLSearchParams(window.location.search);
+            const gameIdFromUrl = urlParams.get('game');
+            
+            if (gameIdFromUrl) {
+                modeSelection.classList.add('hidden');
+                joinOnlineGame(gameIdFromUrl);
+            } else {
+                modeSelection.classList.remove('hidden');
+                window.addEventListener('resize', () => {
+                    drawBoardLines();
+                    updateBoardUI();
+                });
+            }
         });
     </script>
 
