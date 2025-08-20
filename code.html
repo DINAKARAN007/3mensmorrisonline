@@ -239,6 +239,37 @@
 
     <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.9.2/dist/confetti.browser.min.js"></script>
     
+    <!-- FIREBASE INTEGRATION START -->
+    <script type="module">
+      // Import the functions you need from the SDKs you need
+      import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+      import { getAnalytics } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-analytics.js";
+      // TODO: Add SDKs for Firebase products that you want to use
+      // https://firebase.google.com/docs/web/setup#available-libraries
+
+      // Your web app's Firebase configuration
+      // For Firebase JS SDK v7.20.0 and later, measurementId is optional
+      const firebaseConfig = {
+        apiKey: "AIzaSyCImCoJ9Nabe_aicqHdNPARBbICMqTEXNo",
+        authDomain: "threemenmorrisonline.firebaseapp.com",
+        databaseURL: "https://threemenmorrisonline-default-rtdb.firebaseio.com",
+        projectId: "threemenmorrisonline",
+        storageBucket: "threemenmorrisonline.firebasestorage.app",
+        messagingSenderId: "749361110172",
+        appId: "1:749361110172:web:3a1192daac2d599b3d2159",
+        measurementId: "G-WVRBH1Z9L2"
+      };
+
+      // Initialize Firebase
+      const app = initializeApp(firebaseConfig);
+      const analytics = getAnalytics(app);
+
+      // You can now access Firebase services, for example:
+      // console.log("Firebase Initialized:", app);
+      // console.log("Analytics Initialized:", analytics);
+    </script>
+    <!-- FIREBASE INTEGRATION END -->
+
     <script>
         document.addEventListener('DOMContentLoaded', () => {
             // DOM Elements
