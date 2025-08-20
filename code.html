@@ -358,8 +358,8 @@
             ];
             
             // --- Event Listeners ---
-            twoPlayerButton.addEventListener('click', () => startGame('local', false));
-            botButton.addEventListener('click', () => startGame('bot', true));
+            twoPlayerButton.addEventListener('click', () => startGame('local'));
+            botButton.addEventListener('click', () => startGame('bot'));
             onlineButton.addEventListener('click', createOnlineGame);
             copyLinkButton.addEventListener('click', () => {
                 gameLinkInput.select();
@@ -388,6 +388,7 @@
                 
                 const gameURL = `${window.location.origin}${window.location.pathname}?game=${onlineGameId}`;
                 gameLinkInput.value = gameURL;
+                winningScore = parseInt(winningScoreInput.value) || 10; 
 
                 const initialGameState = {
                     boardState: Array(9).fill(0),
@@ -398,8 +399,9 @@
                     redScore: 0,
                     players: { p1: true, p2: false },
                     isGameActive: false,
-                    winningScore: parseInt(winningScoreInput.value),
-                    roundStarter: 1
+                    winningScore: winningScore,
+                    roundStarter: 1,
+                    gameOver: false
                 };
 
                 await set(ref(database, 'games/' + onlineGameId), initialGameState);
@@ -419,17 +421,15 @@
                     }
                     onlineGameId = gameId;
                     localPlayerNumber = 2; // The joiner is player 2 (Red)
-                    
-                    const updatedGameState = { ...gameState };
-                    updatedGameState.players.p2 = true;
-                    updatedGameState.status = "Player Black to Place";
-                    updatedGameState.isGameActive = true;
 
-                    await set(ref(database, 'games/' + onlineGameId), updatedGameState);
-                    
+                    // Set local winningScore from Firebase and update input value
+                    winningScore = gameState.winningScore || 10;
+                    winningScoreInput.value = winningScore;
+
+                    await set(ref(database, `games/${onlineGameId}/players/p2`), true);
+
                     startGame('online');
                     listenForOnlineUpdates();
-
                 } else {
                     alert("Game not found!");
                     modeSelection.classList.remove('hidden');
@@ -443,12 +443,10 @@
                 onValue(gameRef, (snapshot) => {
                     const gameState = snapshot.val();
                     if (!gameState) return;
-
-                    // If P2 joins, creator starts the game
-                    if (localPlayerNumber === 1 && !gameArea.classList.contains('hidden') === false && gameState.players.p2) {
-                        startGame('online');
-                    }
                     
+                    // Capture the state *before* it gets updated by the new data
+                    const wasGameActive = isGameActive;
+
                     // Sync local state with Firebase state
                     boardState = gameState.boardState;
                     currentPlayer = gameState.currentPlayer;
@@ -459,10 +457,31 @@
                     winningScore = gameState.winningScore;
                     roundStarter = gameState.roundStarter;
 
-                    // Update UI for both players
+                    // Update UI for all players
                     updateStatus(gameState.status);
                     updateScoreboard();
                     updateBoardUI();
+
+                    // Check for match victory condition FIRST
+                    if (gameState.gameOver) {
+                        const winnerName = getPlayerName(gameState.winner);
+                        showVictoryCelebration(winnerName, true);
+                        boardContainer.classList.add('disabled');
+                        return; // Stop further processing
+                    }
+                    
+                    // The Host (Player 1) is the authority for starting rounds
+                    if (localPlayerNumber === 1) {
+                        // If P2 just joined for the first time, P1 starts the match
+                        if (!wasGameActive && gameState.players.p2 && blackScore === 0 && redScore === 0) {
+                            startGame('online');
+                            setTimeout(initializeRound, 500); // Small delay before starting
+                        }
+                        // BUG FIX: If a round just ended (was active, now is not), P1 starts the next one
+                        else if (wasGameActive && !isGameActive) {
+                            setTimeout(initializeRound, 2500);
+                        }
+                    }
 
                     // Disable board if it's not the local player's turn
                     if (isGameActive && currentPlayer !== localPlayerNumber) {
@@ -480,13 +499,14 @@
                 const gameState = {
                     boardState, currentPlayer, stonesPlaced, isGameActive,
                     blackScore, redScore, status: statusElement.textContent,
-                    players: {p1: true, p2: true}, winningScore, roundStarter
+                    players: {p1: true, p2: true}, winningScore, roundStarter,
+                    gameOver: false // Default to false unless explicitly set by handleRoundWin
                 };
                 set(ref(database, 'games/' + onlineGameId), gameState);
             }
             
             // --- Core Game Logic ---
-            function startGame(mode, isBot) {
+            function startGame(mode) {
                 gameMode = mode;
                 if (gameMode !== 'online') {
                     modeSelection.classList.add('hidden');
@@ -535,8 +555,9 @@
                     updateStatus('Set score & start a new game!');
                     newMatchButton.classList.remove('hidden');
                 } else {
-                    toggleScoreControls(false); // Only creator can set score initially
-                    newMatchButton.classList.add('hidden'); // New match logic for online needs more work
+                    toggleScoreControls(false); 
+                    newMatchButton.classList.add('hidden');
+                    winningScoreInput.value = winningScore;
                 }
             }
             
@@ -622,22 +643,48 @@
                 switchPlayer();
             }
 
-            function handleRoundWin() {
-                isGameActive = false;
-                const winnerName = getPlayerName(currentPlayer);
-                if (currentPlayer === 1) blackScore++; else redScore++;
-                updateScoreboard();
-                roundStarter = currentPlayer;
-                
+                function handleRoundWin() {
+    // For local/bot games, immediately set isGameActive to false.
+    // For online games, the Firebase listener will handle this state change upon receiving the update,
+    // which is crucial for the host to detect the end of a round and start the next one.
+                  if (gameMode !== 'online') {
+                   isGameActive = false;
+                        }
+                    const winnerName = getPlayerName(currentPlayer);
+                      if (currentPlayer === 1) blackScore++; else redScore++;
+                     updateScoreboard();
+                 roundStarter = currentPlayer; 
+            // ... மீதமுள்ள கோட் 
+
+                const isMatchOver = blackScore >= winningScore || redScore >= winningScore;
+
                 if (gameMode === 'online') {
-                    // For online, only player 1 handles the timeout and restart logic
-                    if (localPlayerNumber === 1) {
-                       updateStatus(`${winnerName} wins the round!`);
-                       updateFirebaseState();
-                       setTimeout(() => initializeRound(), 2500);
+                    // Any player who wins updates the state. The Host's listener will then start the next round.
+                    const { database, ref, set } = window.firebaseDB;
+                    let finalStatus = `${winnerName} wins the round!`;
+                    let finalGameState = {
+                        boardState, currentPlayer, stonesPlaced,
+                        blackScore, redScore, winningScore, roundStarter,
+                        players: { p1: true, p2: true }
+                    };
+
+                    if (isMatchOver) {
+                        finalStatus = `${winnerName} IS THE WINNER!`;
+                        finalGameState.gameOver = true;
+                        finalGameState.isGameActive = false;
+                        finalGameState.winner = currentPlayer;
+                    } else {
+                        finalGameState.gameOver = false;
+                        finalGameState.isGameActive = false;
                     }
+                    
+                    finalGameState.status = finalStatus;
+                    updateStatus(finalStatus);
+                    set(ref(database, 'games/' + onlineGameId), finalGameState);
+
                 } else {
-                    if (blackScore >= winningScore || redScore >= winningScore) {
+                    // Logic for local or bot games remains the same
+                    if (isMatchOver) {
                         showVictoryCelebration(winnerName);
                     } else {
                         updateStatus(`${winnerName} wins the round!`);
@@ -646,10 +693,14 @@
                 }
             }
 
-            function showVictoryCelebration(winnerName) {
+            function showVictoryCelebration(winnerName, isOnline = false) {
                 winnerMessage.textContent = `${winnerName.toUpperCase()} IS THE WINNER!`;
                 victoryOverlay.classList.add('visible');
-                toggleScoreControls(true);
+                
+                if (!isOnline) {
+                    toggleScoreControls(true);
+                }
+
                 const duration = 3 * 1000, end = Date.now() + duration;
                 (function frame() {
                     if (Date.now() > end) return;
@@ -657,17 +708,22 @@
                     confetti({ particleCount: 2, angle: 120, spread: 55, origin: { x: 1 }, colors: ['#000000', '#d92121', '#ffffff'] });
                     requestAnimationFrame(frame);
                 }());
-                let countdown = 5;
-                countdownMessage.textContent = `New game in ${countdown}...`;
-                gameResetTimer = setInterval(() => {
-                    countdown--;
-                    if (countdown > 0) {
-                        countdownMessage.textContent = `New game in ${countdown}...`;
-                    } else {
-                        clearInterval(gameResetTimer);
-                        startNewMatch();
-                    }
-                }, 1000);
+                
+                if (!isOnline) {
+                    let countdown = 5;
+                    countdownMessage.textContent = `New game in ${countdown}...`;
+                    gameResetTimer = setInterval(() => {
+                        countdown--;
+                        if (countdown > 0) {
+                            countdownMessage.textContent = `New game in ${countdown}...`;
+                        } else {
+                            clearInterval(gameResetTimer);
+                            startNewMatch();
+                        }
+                    }, 1000);
+                } else {
+                    countdownMessage.textContent = 'Match Over! Refresh to play again.';
+                }
             }
             
             function switchPlayer() {
@@ -850,6 +906,7 @@
                     drawBoardLines();
                     updateBoardUI();
                 });
+                drawBoardLines();
             }
         });
     </script>
